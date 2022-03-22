@@ -1,0 +1,976 @@
+unit neuron;
+
+interface
+uses Windows,SysUtils,Grids,Graphics,Classes, Math;
+
+type
+    TBaseTab  =  Array[0..32] of single;
+    TExTab    =  Array of TBaseTab;     { Tablica pobudzen dla AMPA }
+    TInhTab   =  Array of TBaseTab;
+    TMexTab   =  Array of TBaseTab;     { Tablica pobudzen dla NMDA }
+    TInEx     =  Array of byte;
+    TInInh    =  Array of byte;
+    Freq      =  Array of Array of integer;
+
+    Point = record
+              x,y  :  word;
+            end;
+    Space = record                 //steps - odstep w krokach pomiedzy wzbudzeniami neurona
+              steps : longword;
+           end;
+    Phase = record
+              aprev,pprev: longword;   //aprev - odstep miedy aktualnym a poprzednim pikiem
+            end;                   //pprev - odstep miedy poprzednim a a jego poprzednim pikiem
+
+    TFixFreq  =  object
+       period   :   integer;
+       phase    :   integer;
+       iFreq    :   integer;
+       iPhase   :   integer;
+       Procedure Init(aFreq,aPhase:integer);
+       procedure SetValues(aFreq,aPhase: integer);
+       Procedure Done;  
+       Function Out(aTime:integer):byte;
+    end;
+
+    TypeFreq = (ext, rnd, net);
+
+    TFreq=record
+          ftype: TypeFreq;
+          v,q: integer;
+        end;
+    TFreqTab=array of array of TFreq;
+    PtrFreqTab=^TFreqTab;
+
+    TRNDFreq    =       object
+
+       ShortestPeriodLimit   :   word;
+       LongestPeriodLimit    :   word;
+       RandPeriod            :   word;
+       LastTime              :   word;
+       procedure Init(lf,hf:integer);
+       procedure SetValues(aLFLim,aHFLim: integer);
+       Procedure Done;
+       Function Out(aTime:integer):byte;
+
+    end;
+
+
+    TNeuron      =      object
+       ExTab   :  TBaseTab;      {           / pobudzajacy  }
+       MexTab  :  TBaseTab;      {  Impulsy  - pamieciowy   }
+       InhTab  :  TBaseTab;      {           \ hamujacy     }
+       MemVol  :  array of double;   {  Ladunek pamieci }
+       SpinePot:  array of single;
+       InEx    :  TInEx;
+       InInh   :  TInInh;
+       STabEx  :  TExTab;        {                         / pobudzajacych  }
+       STabMex :  TMexTab;       {  Tablica kolcow stanow  - pamieciowych   }
+       STabInh :  TInhTab;       {  Tablica stanow wejsc hamujacych         }
+       SOut    :  Integer;
+       SCounter:  Integer;
+       SOutList:  TList; {lista krokow kolejnych odpowiedzi neurona}
+       LPhase  :  Phase; //aktualnie zapisana faza
+       PSP     :  single;
+       Refrak  :  byte;
+       InhDel  :  TInInh;
+       SleepCout  :  TInInh;
+       SleepState :  byte;
+       DispTime   :  byte;
+
+       CaPath     :  Array of byte;
+       SynEx     :   Array of Point;
+       SynInh    :   Array of Point;
+       MemEx     :   Array of Point;
+       MemInh    :   Array of Point;
+       CompDen   :   Array of Point;
+       CompSoma  :   Array of Point;
+
+       AxHill    :   Point;
+       Axon      :   Point;
+       Blue, LightBlue, Green, Cyan, LightCyan, LightGreen, LightGray, Yellow, Brown, Red, Magenta, LightMagenta, LightRed: TColor;
+       NE,NI,N,Treshold,KEP,ReP, RePB, CRefrak,Blh,Alh,PulsH,CaMT,SleepC,Rsp, FQ: integer;
+       EPSPd, IPSPd,LSW, Clog: double;
+       RYS,PMP,KMP,PDP,KDP: integer;
+
+       procedure Init(all: boolean);
+       procedure Done;
+       procedure Run;
+       procedure InitShowNeuron(Pos:Integer; Canvas: TCanvas);
+       procedure InitShow(Pos:Integer);
+       procedure InitValues();
+       procedure InitTables();
+       procedure FillVectors();
+       procedure CleanChart(pos: integer; rysunek: TBitmap);
+       procedure Show(Pos,i:integer; cwidth: integer; Canvas: TCanvas);
+       Function Weight(aNumber:Integer):single;
+       Function Memory(aNumber:Integer):single;
+       function Adaptation(i: integer):single;
+
+       Function NMDATreshCrit(aNumber:integer):byte;
+         { Porownac potencjal sumaryczny (miejscowy) w kolcu z progiem }
+         { otwarcia kanalow NDMA dla Ca }
+
+       procedure CaMemory(aNumber:integer);
+         { Pamiec wapniowa w postaci uproszczonej }
+         { obliczenie czasu i sily pamieci        }
+
+       Function CalcSpinePot(aNumber:integer):byte;
+         { Obliczanie sumarycznego potencjalu w kompartmencie }
+
+       Function ADRV (aNumber:integer):single;
+         {AntiDromic Reset Voltage}
+
+       procedure DrawChart(pos,i,cwidth: integer; Canvas: TCanvas);
+    end; //TNeuron
+
+    PtrNeuron = ^TNeuron;
+
+implementation
+
+//Implementacja obiektow TFixFreq - Czestotliwosci
+
+procedure TFixFreq.Init(aFreq,aPhase:integer);
+begin
+    SetValues(aFreq,aPhase);
+end;
+
+procedure TFixFreq.SetValues(aFreq,aPhase: integer);
+begin
+ {  iFreq  := aFreq;
+   iPhase := aPhase;
+   if (aFreq<>0) then period := 2000 div aFreq else period:=0;
+   phase  := aPhase*period div 100;}
+
+   if (aFreq<>0) then iFreq  := 2000 div aFreq else iFreq := 0;
+   iPhase := aPhase;
+
+end;
+
+procedure TFixFreq.Done;
+begin
+end;
+
+function TFixFreq.Out(aTime:integer):byte;
+var
+  rstep : integer;
+begin
+  Out := 0;
+  if (iFreq <> 0) then
+    begin
+        rstep := aTime - iPhase;
+        if rstep > 0 then
+            if rstep mod iFreq = 0 then Out:=1;
+    end;
+  {
+   if period=0 then
+        Out := 0
+   else
+        if ((aTime - phase) mod period) = 0 then Out := 1 else Out := 0;}
+end;
+
+//implementacja TRNDFreq
+procedure TRNDFreq.SetValues(aLFLim,aHFLim: integer);
+begin
+   ShortestPeriodLimit := (2000 div aHFLim);   { in takts ; 1 takt = 0.5 ms }
+   LongestPeriodLimit := (2000 div aLFLim);    { in takts ; 1 takt = 0.5 ms }
+   Randomize;
+   RandPeriod := 0;
+   LastTime := 0;
+end;
+
+procedure TRNDFreq.Init(lf,hf:integer);
+begin
+  SetValues(lf,hf);
+end;
+
+procedure TRNDFreq.Done;
+begin
+end;
+
+function TRNDFreq.Out(aTime:integer):byte;
+begin
+   if aTime-LastTime = RandPeriod then
+       Out := 1
+   else
+      begin
+        if aTime-LastTime = RandPeriod+1 then
+          begin
+             LastTime := aTime-1;
+             RandPeriod := Random(LongestPeriodLimit-ShortestPeriodLimit)+ShortestPeriodLimit;
+          end;
+          Out := 0;
+        end;
+
+
+
+
+
+end;
+
+//Implementacja modelu NEURONU
+
+procedure TNeuron.Done();
+begin
+   //wyczysc wszystkie tabele dynamiczne
+     SetLength(MemVol,0);
+     SetLength(SpinePot,0);
+     SetLength(InEx,0);
+     SetLength(InInh,0);
+     SetLength(STabEx,0);
+     SetLength(STabMex,0);
+     SetLength(STabInh,0);
+     SetLength(InhDel,0);
+     SetLength(SleepCout,0);
+     SetLength(CaPath,0);
+     SetLength(SynEx,0);
+     SetLength(SynInh,0);
+     SetLength(CompDen,0);
+     SetLength(CompSoma,0);
+     SetLength(MemEx,0);
+     SetLength(MemInh,0);
+end;
+
+procedure TNeuron.InitTables();
+begin
+     SetLength(MemVol,NE+NI+1);
+     SetLength(SpinePot,NE+NI+1);
+     SetLength(InEx,NE+1);
+     SetLength(InInh,NI+1);
+     SetLength(STabEx,NE+1);
+     SetLength(STabMex,NE+1);
+     SetLength(STabInh,NI+1);
+     SetLength(InhDel,NI+1);
+     SetLength(SleepCout,NI+1);
+     SetLength(CaPath,NE+1);
+     SetLength(SynEx,NE+1);
+     SetLength(SynInh,NI+1);
+     SetLength(CompDen,NE+2);
+     SetLength(CompSoma,NI);
+     SetLength(MemEx,NE+1);
+     SetLength(MemInh,NI+1);
+end;
+
+procedure TNeuron.InitValues();
+begin
+     FQ := 10;
+     NE :=13;             { number of excitation inputs }
+     NI :=3;             { number of inhibition inputs }
+     N := NE + NI;
+     Treshold := -50;
+     KEP := -90;
+     ReP := -80;
+     RePB:= -79;
+     EPSPd := -(KEP-Treshold)/N * 2;
+     IPSPd :=  (KEP-Treshold)/N;
+     CRefrak:=  3;
+     Blh := 15;
+     Alh := 30;
+     PulsH := 8;
+     LSW := 0.8;        {  Weight of less significant input }
+     CaMT := -68;        { Ca memory treshold }
+     Clog := 2.3026;
+     SleepC := 15;         { Sleep coeficient }
+     Rsp := -10;  { Reversible synaptic potential }
+     RYS := 200;
+     PMP := 55*RYS div 100;
+     KMP := 70*RYS div 100;
+     PDP := 47*RYS div 100;
+     KDP := 78*RYS div 100;
+     Blue := RGB(0,0,255);
+     LightBlue := RGB(0,204,255);
+     Green := RGB(0,255,0);
+     Cyan := RGB(0,255,255);
+     LightCyan := RGB(194,254,255);
+     LightGreen := RGB(0,255,138);
+     Yellow := RGB(255,255,0);
+     Brown := RGB(165,42,42);
+     Red := RGB(255,0,0);
+     Magenta := RGB(255,0,255);
+     LightMagenta := RGB(238,130,238);
+     LightRed := RGB(255,99,71);
+     LightGray := RGB(192,192,192);
+end;
+
+procedure TNeuron.FillVectors();
+var
+  i,k: integer;
+begin
+  for i := 1 to NE do  InEx[i]:=0;
+  for i := 1 to NI do  InInh[i]:=0;
+
+ { wypelnianie wektora pobudzenia }
+
+  for i := 1 to NI do SleepCout[i] := 0;
+  SleepState := 0;
+
+  ExTab[0]:=0;
+  ExTab[1]:=0;
+  ExTab[2]:=0;
+  ExTab[32]:=0;
+
+  for i := 1 to 4 do ExTab[2+i]:=EPSPd/4*i;
+  for i:=1 to 25 do ExTab[6+i]:=EPSPd/26*(26-i);
+
+  { wypelnianie wektora pamietania }
+
+  MExTab[0]:=0;
+  MExTab[1]:=0;
+  MExTab[2]:=0;
+  MExTab[32]:=0;
+
+  for i := 1 to 4 do MExTab[2+i]:=EPSPd/20*i;         {for i := 1 to 4 do MExTab[2+i]:=EPSPd/20*i;}
+  for i:=1 to 25 do MExTab[6+i]:=EPSPd/130*(26-i);    {for i:=1 to 25 do MExTab[6+i]:=EPSPd/130*(26-i);}
+
+  { wypelnianie wektora wyhamowania }
+
+  InhTab[0]:=0;
+  InhTab[1]:=0;
+  InhTab[2]:=0;
+
+  for i := 1 to 4 do InhTab[2+i]:=IPSPd/4*i;
+  for i:=1 to 19 do InhTab[6+i]:=IPSPd/20*(20-i);
+  for i := 1 to 7 do InhTab[25+i]:=0;
+
+  { wypelnianie tablicy stanow wejsc pobudzajacych i hamujacych }
+
+  for i := 0 to 32 do
+     begin
+          for k := 1 to NE do STabEx[k,i] := ReP;
+          for k := 1 to NE do STabMex[k,i] := Rep;
+          for k := 1 to NI  do STabInh[k,i] := ReP;
+     end;
+
+  for k := 1 to NE do
+     begin
+          //MemVol[k] := 0;   { zerow. ladunku pamieci }
+          //CaPath[k] := 0;
+     end;
+end; {FillVectors}
+
+procedure TNeuron.Init(all: boolean);
+var
+  z  :  integer;
+begin
+  if all then InitValues();
+  InitTables();
+
+  for z := 1 to NE do  InEx[z]:=0;
+  for z := 1 to NI do  InInh[z]:=0;
+
+  FillVectors();
+  Refrak := 0;
+  SCounter := 0; //zeruj licznik
+  SOutList:=TList.Create;
+end;  { Neuron.Init }
+
+function TNeuron.CalcSpinePot(aNumber:integer):byte;
+var
+  m : integer;
+function Influence(aSource,aDest:integer):single;
+  begin
+     if aDest>=aSource then Influence := 1-(1-LSW)/(N-1)*(aDest-aSource)
+     else if (aSource - aDest) <= (N/4) then Influence := 1-4/N*(aSource-aDest) else Influence := 0;
+  end; //Influence
+
+begin
+
+ if ((1 <= aNumber) and (aNumber <= N)) then
+   begin
+      SpinePot[aNumber] := REP;
+
+      for m := 1 to NE do
+          SpinePot[aNumber] := SpinePot[aNumber] + ((STabEx[m,0]-Rep) * Influence(m,aNumber)) + ((STabMex[m,0]-Rep) * Influence(m,aNumber))*7;
+
+      for m := 1 to NI do
+           SpinePot[aNumber] := SpinePot[aNumber] + (STabInh[m,0]-Rep) * Influence(m+NE,aNumber);
+
+      CalcSpinePot := 0;
+   end
+ else
+      CalcSpinePot := 1;
+end; //CalcSpinePot
+
+function TNeuron.NMDATreshCrit(aNumber:integer):byte;
+{ Porownac potencjal sumaryczny (miejscowy) w kolcu z progiem }
+{ otwarcia kanalow NMDA dla Ca }
+begin
+   CalcSpinePot(aNumber);
+   if SpinePot[aNumber] >= CaMT then NMDATreshCrit := 1 else NMDATreshCrit := 0 ;
+end;  {  TNeuron.NMDATresholdCrit }
+
+procedure TNeuron.CaMemory(aNumber:integer);
+{ Pamiec wapniowa w postaci uproszczonej }
+{ obliczenie czasu i sily pamieci        }
+var
+  power : real;
+  function SpineCoef(aNum:integer):single; { Wspolczynniki pamieci Ca - (w kolcu/poza)}
+    begin
+       SpineCoef := ((aNum mod 2)+1)/2;
+    end;
+begin
+   power :=(STabMex[aNumber,0] - Rep)*6;             {power := STabMex[aNumber,0] - ReP)*10}
+   MemVol[aNumber] := MemVol[aNumber] + Exp(power)-1;           {MemVol[aNumber] := MemVol[aNumber] +Exp(power)-1;}
+  // if MemVol[aNumber] > 1 then MemVol[aNumber]:=MemVol[aNumber] - 1.0;
+   if MemVol[aNumber] > FQ then
+
+     MemVol[aNumber]:= MemVol[aNumber]-FQ     {MemVol[aNumber]:= (MemVol[aNumber]-FQ)}
+
+
+         else MemVol[aNumber]:=0;
+end; //CaMemory
+
+
+function TNeuron.Weight(aNumber:Integer):single;
+begin
+   Weight := (1-LSW)/(NE-1)*(aNumber-NE)+1;
+end;
+
+function TNeuron.Memory(aNumber:integer):single;
+begin
+   Memory := 1+1/6*ln(MemVol[aNumber]+1)/Clog;        {Memory := 1+1/6*ln(MemVol[aNumber]+1)/Clog;}
+end;
+
+function TNeuron.ADRV(aNumber: Integer):single;
+begin
+  ADRV:=ReP-((ReP-RePB)/NE)*(NE-aNumber);
+end;
+
+
+function TNeuron.Adaptation(i: integer):single;
+begin
+  Adaptation:=((Rep-Rsp)-(Rep-SpinePot[i]))/(Rep-Rsp);
+   // Adaptation:=((Rep-Rsp)-(Rep-ExTab[i]))/(Rep-Rsp);
+end;
+
+procedure TNeuron.Run;
+var
+  i,k     :    integer;
+  ptr,aptr,pptr    :    ^space;
+
+begin
+
+SOut := 0;
+
+//if Refrak = 0 then      { jesli komorka nie jest w stanie refrakcji }
+  //begin
+    for i := 1 to NE do
+       begin
+          if InEx[i] = 1 then
+                for k := 0 to 32 do STabEx[i,k] := STabEx[i,k] + Adaptation(i)*Memory(i)*ExTab[k];
+                 //for k := 0 to 32 do
+
+                  //STabEx[i,k] := STabEx[i,k] +  Memory(i)*ExTab[k];
+
+       end;
+
+
+    for i := 1 to NI do
+       if InInh[i] = 1 then
+           begin
+              InhDel[i] := 6;
+              for k := 0 to 32 do
+
+              STabInh[i,k] := STabInh[i,k] + InhTab[k];
+           end;
+
+
+    for i := 1 to NE do
+       begin
+
+           if (InEx[i] = 1) and (CaPath[i] = 1) {or (CaPath[i] = 0))}then
+                 for k := 0 to 32 do
+
+
+                   STabMex[i,k] := (STabMex[i,k] + MexTab[k]);
+
+           CaMemory(i);
+           if NMDATreshCrit(i) = 1 then CaPath[i] := 1 else CaPath[i] := 0;
+       end;
+
+
+    for i := NE+1 to N do CalcSpinePot(i);
+    if Refrak = 0 then
+    begin
+
+    PSP := ReP;
+
+    for i := 1 to NE do PSP := PSP +  Weight(i) * (STabEx[i,0]-ReP);
+    for i := 1 to NI do PSP := PSP + STabInh[i,0]-ReP;
+    //for i := 1 to NE do PSP := PSP +  10*(STabMex[i,0]-ReP);
+
+
+    if PSP < KEP then PSP := KEP;
+
+
+   { for i := 1 to NE do               //dodanoIIIIIIIIIIIIIIIIIIIIIIIII
+      begin                            //dodanoIIIIIIIIIIIIIIIIIIIIIIIII
+        for k := 0 to 32 do
+       if SpinePot[i] >= 0 then readln;//dodanoIIIIIIIIIIIIIIIIIIIIIIIII
+      end; }
+
+
+
+    if PSP >= Treshold then
+       begin
+           SOut := 1;
+           Refrak := CRefrak;
+           for i := 0 to 32 do
+               begin
+                 for k := 1 to NE do STabEx[k,i] := ADRV(k);
+                 for k := 1 to NI  do STabInh[k,i] := ReP;
+
+               end;
+
+
+        end
+    else    { uplyw czasu, przesow tabl. stanow dla we pobudz., ham., pamieciowych }
+        begin
+           for k := 0 to 31 do
+            begin
+              for i := 1 to NE do STabEx[i,k]:=STabEx[i,k+1];
+              for i := 1 to NE do STabMex[i,k]:=STabMex[i,k+1];
+
+                            
+            end;
+               //FQ:=FQ+1;
+
+
+           if SleepState = 0 then
+              for k := 0 to 31 do
+                 for i := 1 to NI do STabInh[i,k]:=STabInh[i,k+1]
+
+
+
+           else   //SleepState <> 0
+              begin
+                 for i := 1 to NI do
+                  begin
+                     if InhDel[i] > 0  then
+                       begin
+                         Dec(InhDel[i]);
+                         for k := 0 to 31 do STabInh[i,k]:=STabInh[i,k+1];
+                       end
+                     else //InhDel[i] <=0
+                       begin
+                           Inc(SleepCout[i]);
+                           if SleepCout[i] = SleepC then
+                             begin
+                                SleepCout[i] := 0;
+                                for k := 0 to 31 do
+                                   STabInh[i,k]:=STabInh[i,k+1];
+                              end//if SleepCount
+                       end;//if InhDel >0
+                  end;//for
+               end;//if SleepState = 0
+             //FQ:=FQ+1;
+      end;//PSP >= Treshold
+  end
+ else  //Refrak <> 0
+
+
+
+
+   begin
+
+
+        for k := 0 to 31 do
+            begin
+              //for i := 1 to NE do STabEx[i,k]:=STabEx[i,k+1];
+              for i := 1 to NE do STabMex[i,k]:=STabMex[i,k+1];
+
+                            
+            end;
+
+
+           
+       //  PSP := ReP;
+         if Refrak = (CRefrak - 1) then PSP := ReP;
+         Refrak := Refrak - 1;
+        
+   end;
+
+   if PSP < REP then SleepState := 1 else SleepState := 0;
+
+  //licznik do wykresu fazowego
+  if SOut=1 then
+     begin
+       New(ptr);
+       ptr^.steps:=SCounter;
+       SOutList.Add(ptr);
+     //  SCounter:=0;
+
+       k:=SOutList.Count;
+       if (k>2) then
+          begin
+              aptr:=SOutList.Items[k-2];
+              pptr:=SOutList.Items[k-3];
+              LPhase.aprev:=ptr.steps-aptr.steps;
+              LPhase.pprev:=aptr.steps-pptr.steps;
+          end;
+     end
+        else
+          Inc(SCounter);
+
+          //FQ:=FQ+1;
+end;  { Neuron.Run }
+
+
+procedure TNeuron.InitShow(Pos: Integer);
+var
+  i,y : Integer;
+
+begin
+  y := Pos;
+  for i := 1 to NE do
+    begin
+      SynEx[i].x := PMP-7;
+      SynEx[i].y := y+i*Blh;
+      MemEx[i].x := PMP+2;
+      MemEx[i].y := y+i*Blh;
+      CompDen[i].x := PMP+10;
+      CompDen[i].y := y+i*Blh;
+    end;
+
+  i := NE+1;
+  SynInh[1].x := PMP-7;
+  SynInh[1].y := y+i*Blh;
+  MemInh[1].x := PMP+2;
+  MemInh[1].y := y+i*Blh;
+  CompDen[i].x := PMP+10;
+  CompDen[i].y := y+i*Blh;
+
+  for i := 1 to NI-1 do
+   begin
+      CompSoma[i].x := PDP+10;
+      CompSoma[i].y := y+(i+NE+1)*Blh;
+      SynInh[i+1].x := PDP-7;
+      SynInh[i+1].y := y+(i+NE+1)*Blh;
+      MemInh[i].x := PDP+2;
+      MemInh[i].y := y+(i+NE+1)*Blh;
+   end;
+end; //InitShow
+
+procedure TNeuron.InitShowNeuron(Pos:Integer; Canvas: TCanvas);
+var
+ i,y : Integer;
+ x1,y1,x2,y2: integer;
+
+begin
+  y:=pos;
+
+  AxHill.x := PMP+15;
+  AxHill.y := y+(NE+NI+1)*Blh-6;
+  Axon.x := PMP+15;
+  Axon.y := y+(NE+NI+1)*Blh+Alh-6;
+
+  for i:=1 to NE+1 do
+  begin
+    Canvas.Pen.Color:=clWhite;
+    Canvas.MoveTo(PMP,y+i*Blh-(Blh div  2));
+    Canvas.LineTo(KMP,y+i*Blh-(Blh div 2));
+  end;
+
+  for i:=NE+1 to NE+NI do
+  begin
+    Canvas.Pen.Color:=clWhite;
+    Canvas.MoveTo(PDP,y-1+(i+1)*Blh-(Blh div 2));
+    Canvas.LineTo(KDP+1,y-1+(i+1)*Blh-(Blh div 2));
+  end;
+
+  Canvas.Pen.Color:=clWhite;
+  Canvas.MoveTo(PMP,pos+1+Blh div 2);
+  Canvas.LineTo(PMP,pos+(Blh div 2)+(NE+1)*Blh);
+  Canvas.MoveTo(PMP+8,pos+1+Blh div 2);
+  Canvas.LineTo(PMP+8,pos+(Blh div 2)+(NE+1)*Blh);
+  Canvas.MoveTo(KMP,pos+1+Blh div 2);
+  Canvas.LineTo(KMP,pos+(Blh div 2)+(NE+1)*Blh);
+
+  Canvas.MoveTo(PDP,pos+1+Blh div 2+(NE+1)*Blh);
+  Canvas.LineTo(PDP,pos+(Blh div 2)+(NE+NI)*Blh);
+  Canvas.MoveTo(PDP+8,pos+1+Blh div 2+(NE+1)*Blh);
+  Canvas.LineTo(PDP+8,pos+(Blh div 2)+(NE+NI)*Blh);
+  Canvas.MoveTo(KDP,pos+1+Blh div 2+(NE+1)*Blh);
+  Canvas.LineTo(KDP,pos+(Blh div 2)+(NE+NI)*Blh);
+
+  Canvas.MoveTo(PDP+8,pos+1+Blh div 2+(NE+NI)*Blh);
+  Canvas.LineTo(PDP+26,pos+1+Blh div 2+(NE+NI)*Blh+Alh);
+  Canvas.MoveTo(KDP-8,pos+1+Blh div 2+(NE+NI)*Blh);
+  Canvas.LineTo(KDP-26,pos+1+Blh div 2+(NE+NI)*Blh+Alh);
+
+  Canvas.MoveTo(PDP+26,pos+1+Blh div 2+(NE+NI)*Blh+Alh-1);
+  Canvas.LineTo(KDP-26+1,pos+1+Blh div 2+(NE+NI)*Blh+Alh-1);
+
+  Canvas.Pen.Color:=clWhite;
+  Canvas.MoveTo(PDP+26,pos+1+Blh div 2+(NE+NI)*Blh+4*Alh);
+  Canvas.LineTo(KDP-26+1,pos+1+Blh div 2+(NE+NI)*Blh+4*Alh);
+  Canvas.Pen.Color:=clWhite;
+  Canvas.MoveTo(PDP+26,pos+1+Blh div 2 +(NE+NI)*Blh+Alh);
+  Canvas.LineTo(PDP+26,pos+1+Blh div 2+(NE+NI)*Blh+4*Alh);
+  Canvas.MoveTo(KDP-26,pos+1+Blh div 2+(NE+NI)*Blh+Alh);
+  Canvas.LineTo(KDP-26,pos+1+Blh div 2+(NE+NI)*Blh+4*Alh);
+
+  Canvas.Pen.Color:=LightRed;
+
+  for i:=1 to NE do
+  begin
+       x1:=PDP+5;
+       y1:=Pos+i*Blh-8;
+       x2:=x1+14;
+       y2:=y1+14;
+       Canvas.Arc(x1,y1,x2,y2,(x1+x2) div 2, y1,(x1+x2) div 2, y2);
+  end;
+
+  Canvas.MoveTo(PMP-5,pos+1+(Blh div 2));
+  Canvas.LineTo(PMP-5,pos+1+(Blh div 2)+NE*Blh);
+
+  Canvas.Pen.Color:=LightCyan;
+  for i:=NE+2 to NE+NI do
+  begin
+       x1:=PDP-10;
+       y1:=Pos+i*Blh-8;
+       x2:=x1+14;
+       y2:=y1+14;
+       Canvas.Arc(x1,y1,x2,y2,(x1+x2) div 2, y1,(x1+x2) div 2, y2);
+  end;
+  x1:=PDP+5;
+  y1:=pos+(NE+1)*Blh-8;
+  x2:=x1+14;
+  y2:=y1+14;
+  Canvas.Arc(x1,y1,x2,y2,(x1+x2) div 2, y1,(x1+x2) div 2, y2);
+
+  Canvas.MoveTo(PDP-5,pos+1+Blh div 2+(NE+1)*Blh);
+  Canvas.LineTo(PDP-5,pos+(Blh div 2)+(NE+NI)*Blh);
+  Canvas.MoveTo(PMP-5,pos+1+Blh div 2+Blh*NE);
+  Canvas.LineTo(PMP-5,pos+(Blh div 2)+(NE+1)*Blh);
+
+end; {TNeuron.InitShow}
+
+
+procedure TNeuron.Show(Pos,i:integer; cwidth: integer; Canvas: TCanvas);
+Var
+       k       :     integer;
+  //     x,y     :     integer;
+       Color    :     Byte;
+       ncolor : TColor;
+begin
+
+//y := Pos;
+//x := i mod (cwidth+1); ;
+
+ Canvas.Brush.Style:=bsSolid;
+ if SOut = 1 then  DispTime:=10;
+
+ if DispTime = 10 then
+  begin
+      Canvas.Brush.Color:=LightGray;
+      Canvas.FloodFill(Axon.x,Axon.y,clWhite,fsBorder);
+  end;
+
+ if DispTime > 0 then Dec(DispTime);
+
+ if DispTime = 1 then
+  begin
+      Canvas.Brush.Color:=clBlack;
+      Canvas.FloodFill(Axon.x,Axon.y,clWhite,fsBorder);
+  end;
+
+  for k := 1 to NE do
+    begin
+          Case InEx[k] of
+            0: ncolor:=clBlack;
+            1: ncolor:=clWhite;
+          else
+            ncolor:=clBlack;
+          end;
+          Canvas.Brush.Color:=ncolor;
+          With SynEx[k] do
+            Canvas.FloodFill(x,y,LightRed,fsBorder);
+        end;
+
+      for k := 1 to NI do
+        begin
+          Case InInh[k] of
+            0: ncolor:=clBlack;
+            1: ncolor:=LightGreen;
+          else
+            ncolor:=clBlack;
+          end;
+          Canvas.Brush.Color:=ncolor;
+          With SynInh[k] do
+           Canvas.FloodFill(x,y,LightCyan,fsBorder);
+        end;
+
+// Barwienie AxonHill
+   Color := (Trunc(PSP+85)) div 5;
+    Case Color of
+       0: ncolor:=Blue;
+       1: ncolor:=Blue;
+       2: ncolor:=LightBlue;
+       3: ncolor:=Green;
+       4: ncolor:=Cyan;
+       5: ncolor:=LightCyan;
+       6: ncolor:=LightGreen;
+     else
+         ncolor:=Yellow;
+     end;
+     Canvas.Brush.Style:=bsSolid;
+     Canvas.Brush.Color:=ncolor;
+     Canvas.FloodFill(AxHill.x,AxHill.y,clWhite, fsBorder);
+
+// Barwienie Dendrytu
+  For k := 1 to NE+1 do
+   begin
+    Color := (Trunc(SpinePot[k]+85)) div 5;
+    Case Color of
+       0: ncolor:=Blue;
+       1: ncolor:=Blue;
+       2: ncolor:=LightBlue;
+       3: ncolor:=Green;
+       4: ncolor:=Cyan;
+       5: ncolor:=LightCyan;
+       6: ncolor:=LightGreen;
+     else
+         ncolor:=Yellow;
+     end;
+
+     Canvas.Brush.Style:=bsSolid;
+     Canvas.Brush.Color:=ncolor;
+     Canvas.FloodFill(CompDen[k].x,CompDen[k].y,clWhite, fsBorder);
+   end;
+
+// Barwienie Ciala komorki
+ For k := NE+2 to N do
+     begin
+      Color := (Trunc(SpinePot[NE+2]+85)) div 5;
+      Case Color of
+       0: ncolor:=Blue;
+       1: ncolor:=Blue;
+       2: ncolor:=LightBlue;
+       3: ncolor:=Green;
+       4: ncolor:=Cyan;
+       5: ncolor:=LightCyan;
+       6: ncolor:=LightGreen;
+     else
+         ncolor:=Yellow;
+     end;
+     Canvas.Brush.Style:=bsSolid;
+     Canvas.Brush.Color:=ncolor;
+     Canvas.FloodFill(CompSoma[k-NE-1].x,CompSoma[k-NE-1].y,clWhite, fsBorder);
+     end;
+
+// Barwienie komorek pamieci
+ For k := 1 to NE do
+     begin
+      Color := (Trunc(Memory(k)*10));
+      Case Color of
+       0,1,2,3,4,5,6,7,8,9: ncolor:=clBlack;
+       10,11,12,13,14,15,16,17: ncolor:=Brown;
+       18: ncolor:=Red;
+       19: ncolor:=Magenta;
+       20: ncolor:=LightMagenta;
+       21: ncolor:=LightRed;
+      else
+         ncolor:=Yellow;
+      end;
+
+      Canvas.Brush.Style:=bsSolid;
+      Canvas.Brush.Color:=ncolor;
+      Canvas.FloodFill(MemEx[k].x,MemEx[k].y,clWhite, fsBorder);
+     end;
+
+end; { TNeuron.Show }
+
+procedure TNeuron.DrawChart(pos,i,cwidth:integer; Canvas: TCanvas);
+var
+  x,y,k: integer;
+  redline: integer;
+begin
+    //Canvas.Lock;
+  y := Pos;
+  x := i mod (cwidth+1);
+
+  Canvas.Pen.Color:=clWhite;
+  for k := 1 to NE do
+     if InEX[k] = 1 then
+       begin
+         Canvas.MoveTo(x,y+k*Blh);
+         Canvas.LineTo(x,y+k*Blh-PulsH);
+       end;
+
+  Canvas.Pen.Color:=clWhite;
+  for k := 1 to NI do
+    if InInh[k] = 1 then
+      begin
+         Canvas.MoveTo(x,y+(k+NE)*Blh);
+         Canvas.LineTo(x,y+(k+NE)*Blh-PulsH);
+      end;
+
+  Canvas.Pen.Color:=clWhite;
+  if SOut = 1 then //rysowanie piku
+       begin
+        Canvas.Pen.Color:=clWhite;
+        Canvas.MoveTo(x,y+(NE+NI+2)*Blh);
+        Canvas.LineTo(x,y+(NE+NI+2)*Blh-2*PulsH);
+       end;
+
+  Canvas.Pen.Color:=clYellow;
+  redline :=  y + (NE+NI+2)*Blh;
+  y := y + (NE+NI+2)*Blh + Alh - Round(PSP-ReP);
+  if y<redline then y:=redline; //2*PulsH wysokosc piku
+  Canvas.Pixels[x,y]:=clYellow;
+
+  if SOut = 1 then
+    begin
+      k:=y;
+      while k<(y-ReP+Treshold) do
+        begin
+            Canvas.Pixels[x+1,k]:=clYellow;
+            Canvas.Pixels[x+1,k+1]:=clYellow;
+            k:=k+4;
+        end;
+    end;
+end;  //DrawChart
+
+procedure TNeuron.CleanChart(pos:integer; rysunek: TBitmap);
+var
+  x,y,i: integer;
+  linia   : PByteArray;
+begin
+  for y:=0 to rysunek.Height-1 do
+      begin
+        // zeskanowanie poziomej linii bitmapy
+        linia:=rysunek.ScanLine[y];
+        x:=0;
+        repeat
+          linia[x]:=0;    // R składowa czerwona
+          linia[x+1]:=0;  // G składowa zielona
+          linia[x+2]:=0;  // B składowa niebieska
+          x:=x+3;
+        until x>(rysunek.Width-1)*3;
+      end;
+  y:=pos;
+  for i:=1 to NE+1 do
+  begin
+    rysunek.Canvas.Pen.Color:=clRed;
+    rysunek.Canvas.MoveTo(0,y+i*Blh);
+    rysunek.Canvas.LineTo(rysunek.Width,y+i*Blh);
+  end;
+
+  for i:=NE+1 to NE+NI do
+  begin
+    rysunek.Canvas.Pen.Color:=clLime;
+    rysunek.Canvas.MoveTo(0,y+i*Blh);
+    rysunek.Canvas.LineTo(rysunek.Width,y+i*Blh);
+  end;
+
+  rysunek.Canvas.Pen.Color:=clRed;
+  y :=y + (NE+NI+2)*Blh;
+  rysunek.Canvas.MoveTo(0,y);
+  rysunek.Canvas.LineTo(rysunek.Width,y);
+  rysunek.Canvas.Pen.Color:=clBlue;
+  y := y + Alh;
+  rysunek.Canvas.MoveTo(0,y);
+  rysunek.Canvas.LineTo(rysunek.Width,y);
+end;
+end.
